@@ -2,31 +2,24 @@ from fastapi import FastAPI
 from routes import equipment
 from fastapi.middleware.cors import CORSMiddleware
 
-# =====================================================
-# APP INIT
-# =====================================================
 app = FastAPI(title="UREC Live API")
 
-# =====================================================
-# 🔧 Enable CORS for local Streamlit communication
-# =====================================================
+# Enable CORS for Streamlit (localhost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8501",   # Streamlit default
-        "http://127.0.0.1:8501",   # Alternative
-        "*"                        # (Optional) allow all during dev
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+        "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =====================================================
-# ROUTES
-# =====================================================
+# Include Routes
 app.include_router(equipment.router)
 
 @app.get("/")
 def root():
-    return {"message": "UREC Live Backend is running with Firebase and CORS enabled!"}
+    return {"message": "UREC Live Backend running with Firebase and CORS enabled!"}

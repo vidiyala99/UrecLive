@@ -1,42 +1,61 @@
 import streamlit as st
 import requests
-import pandas as pd
-import plotly.graph_objects as go
-import uuid
 from datetime import datetime, timezone
 from streamlit_autorefresh import st_autorefresh
+from firebase_auth import signup_user, signin_user  # Firebase helpers
 
 # =====================================================
-# PAGE CONFIG (must be first)
+# PAGE CONFIG
 # =====================================================
-st.set_page_config(
-    page_title="UREC Live Dashboard",
-    page_icon="💪",
-    layout="wide"
-)
+st.set_page_config(page_title="UREC Live Dashboard", page_icon="💪", layout="wide")
+
+# -------------------- CSS --------------------
+st.markdown("""
+<style>
+.stApp { background:#0e1117; color:#e5e7eb; }
+h1, h2, h3 { letter-spacing:.2px; }
+.urec-gradient {
+  background:linear-gradient(90deg,#34d399,#60a5fa,#c084fc);
+  -webkit-background-clip:text; color:transparent;
+}
+.glass {
+  background:rgba(255,255,255,0.06);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:18px; padding:18px 20px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.25);
+}
+.stButton>button {
+  border-radius:12px !important;
+  border:1px solid rgba(255,255,255,0.12)!important;
+  background:#1f2937!important; color:#e5e7eb!important;
+  padding:10px 14px!important;
+}
+.overlay {
+  max-width:680px; margin:7vh auto; padding:28px;
+  border-radius:20px; background:rgba(17,24,39,0.75);
+  border:1px solid rgba(255,255,255,0.1);
+  box-shadow:0 20px 80px rgba(0,0,0,0.55);
+}
+.sugg-card {
+  background:rgba(255,255,255,0.04);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:14px; padding:14px 16px; margin:8px 0;
+}
+.disabled-btn {
+  opacity:0.4; pointer-events:none;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================================
-# USER SESSION MANAGEMENT
-# =====================================================
-# Initialize session variables first
-if "user_id" not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())[:8]  # short unique ID
-if "user_name" not in st.session_state:
-    st.session_state.user_name = "demo_user"
-
-# Display user info *after* initialization
-st.caption(f"Logged in as: **{st.session_state.user_name}** ({st.session_state.user_id})")
-
-# =====================================================
-# ENDPOINTS & CONSTANTS
+# CONSTANTS
 # =====================================================
 API_URL = "http://127.0.0.1:8000/analytics/heatmap"
-USAGE_LOGS_URL = "http://127.0.0.1:8000/usage_logs"
 USAGE_UPDATE_URL = "http://127.0.0.1:8000/usage_logs/update"
+EQUIPMENTS_URL = "http://127.0.0.1:8000/equipments"
 REFRESH_INTERVAL = 5  # seconds
 
-# ETA defaults (minutes)
-AVG_SESSION_TIME_DEFAULT = 25
+# Adaptive session averages (mins)
 AVG_SESSION_TIME_BY_ZONE = {
     "cardio": 20,
     "dumbbells": 12,
@@ -44,334 +63,364 @@ AVG_SESSION_TIME_BY_ZONE = {
     "squat racks": 25,
     "Back Machines": 18,
 }
+DEFAULT_SESSION = 20
 
-# =====================================================
-# THEME (Dark/Light toggle)
-# =====================================================
-if "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "Dark"
-
-with st.sidebar:
-    st.title("⚙️ Dashboard Settings")
-    st.session_state.theme_mode = st.radio(
-        "🎨 Theme Mode",
-        ["Dark", "Light"],
-        horizontal=True,
-        index=0 if st.session_state.theme_mode == "Dark" else 1
-    )
-
-if st.session_state.theme_mode == "Dark":
-    BACKGROUND = "#0e1117"
-    CARD_COLOR = "#1f2937"
-    TEXT_COLOR = "white"
-    BORDER_COLOR = "#3b3b3b"
-    SUCCESS = "#22c55e"
-    WARNING = "#facc15"
-    ERROR = "#ef4444"
-else:
-    BACKGROUND = "#f9f9f9"
-    CARD_COLOR = "#ffffff"
-    TEXT_COLOR = "#000000"
-    BORDER_COLOR = "#cccccc"
-    SUCCESS = "#16a34a"
-    WARNING = "#eab308"
-    ERROR = "#dc2626"
-
-st.markdown(f"""
-    <style>
-    .stApp {{ background-color: {BACKGROUND}; color: {TEXT_COLOR}; }}
-    .stButton > button {{
-        border-radius: 10px; border: 1px solid {BORDER_COLOR};
-        background-color: {CARD_COLOR}; color: {TEXT_COLOR};
-        transition: 0.2s ease-in-out;
-    }}
-    .stButton > button:hover {{
-        transform: scale(1.05);
-        background-color: rgba(255,255,255,0.08);
-        border-color: {WARNING};
-    }}
-    </style>
-""", unsafe_allow_html=True)
-
-# =====================================================
-# MUSCLE GROUP → ZONES
-# =====================================================
-MUSCLE_ZONE_MAP = {
-    "All": ["benches", "dumbbells", "Back Machines", "cardio", "squat racks"],
-    "Chest": ["benches"],
-    "Back": ["Back Machines"],
-    "Legs": ["squat racks", "Back Machines"],
-    "Arms": ["dumbbells"],
-    "Core": ["dumbbells"],
-    "Cardio": ["cardio"],
+WORKOUT_LIBRARY = {
+    "Chest": [
+        {"name": "Bench Press", "zone": "benches"},
+        {"name": "Incline Dumbbell Press", "zone": "dumbbells"},
+    ],
+    "Back": [
+        {"name": "Lat Pulldown", "zone": "Back Machines"},
+        {"name": "Seated Row", "zone": "Back Machines"},
+    ],
+    "Legs": [
+        {"name": "Back Squat", "zone": "squat racks"},
+        {"name": "Leg Extension", "zone": "Back Machines"},
+    ],
+    "Arms": [
+        {"name": "Bicep Curls", "zone": "dumbbells"},
+        {"name": "Tricep Pushdown", "zone": "Back Machines"},
+    ],
+    "Core": [
+        {"name": "Weighted Crunch", "zone": "dumbbells"},
+        {"name": "Cable Woodchop", "zone": "Back Machines"},
+    ],
+    "Cardio": [
+        {"name": "Treadmill Run", "zone": "cardio"},
+        {"name": "Bike Intervals", "zone": "cardio"},
+    ],
 }
 
 # =====================================================
-# HEADER / AUTOREFRESH
+# SESSION STATE
 # =====================================================
-st.title("🏋️ UREC Live Equipment Dashboard")
-st.caption("Real-time gym utilization, wait-time predictions, and check-in/out")
-st_autorefresh(interval=REFRESH_INTERVAL * 1000, limit=None, key="auto-refresh")
-
-# =====================================================
-# SIDEBAR CONTROLS
-# =====================================================
-with st.sidebar:
-    st.text_input("👤 Your Name (optional)", key="user_name", value=st.session_state.user_name)
-    st.caption(f"🆔 Session ID: `{st.session_state.user_id}` (auto-assigned)")
-    st.write(f"⏱ Refresh every **{REFRESH_INTERVAL} seconds**")
-    st.markdown("---")
+defaults = {
+    "user_id": None,
+    "user_name": None,
+    "auth_complete": False,
+    "stage": "login",
+    "selected_group": None,
+    "switch_target": None,
+    "show_modal": False,
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # =====================================================
 # API HELPERS
 # =====================================================
-def fetch_heatmap():
+def fetch_json(url):
     try:
-        r = requests.get(API_URL, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            data["fetched_at"] = datetime.now().strftime("%H:%M:%S")
-            return data
-        st.error(f"Heatmap error: {r.status_code} - {r.text}")
-    except Exception as e:
-        st.error(f"Heatmap connection error: {e}")
-    return None
+        r = requests.get(url, timeout=5)
+        return r.json() if r.status_code == 200 else None
+    except:
+        return None
 
-
-def fetch_usage_logs(zone: str) -> list:
-    try:
-        r = requests.get(f"{USAGE_LOGS_URL}/{zone}", timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        st.error(f"Logs error for {zone}: {e}")
-    return []
-
-
-def post_usage_update(zone: str, status: str) -> requests.Response:
-    """Send a usage event to the backend and return full response."""
+def post_usage_update(zone, status):
     payload = {
         "zone": zone,
         "status": status,
-        "user": st.session_state.user_name or st.session_state.user_id,
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "user": st.session_state.user_name or "demo_user",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        r = requests.post(USAGE_UPDATE_URL, json=payload, timeout=6)
-        return r
-    except Exception as e:
-        st.error(f"Update error: {e}")
+        return requests.post(USAGE_UPDATE_URL, json=payload, timeout=10)
+    except:
         return None
+
+def get_eta_for_zone(zone, utilization):
+    avg_time = AVG_SESSION_TIME_BY_ZONE.get(zone, DEFAULT_SESSION)
+    return int((utilization / 100.0) * avg_time)
 
 # =====================================================
-# LOGS → TIME SERIES
+# LOGIN
 # =====================================================
-def _parse_ts(x: str):
-    if not x:
-        return None
-    try:
-        return pd.to_datetime(x, utc=True)
-    except Exception:
-        return None
+def login_screen():
+    st.markdown('<div class="overlay">', unsafe_allow_html=True)
+    st.markdown("<h2 class='urec-gradient'>🔐 Welcome to UREC Live</h2>", unsafe_allow_html=True)
 
+    mode = st.radio("Mode:", ["Login", "Sign Up"], horizontal=True)
+    with st.form("auth_form"):
+        email = st.text_input("📧 Email")
+        password = st.text_input("🔑 Password", type="password")
+        submit = st.form_submit_button("Continue →")
 
-def logs_to_timeseries(records: list) -> pd.DataFrame:
-    if not records:
-        return pd.DataFrame(columns=["ts", "utilization_percent"])
-
-    df = pd.DataFrame(records)
-
-    if {"timestamp", "utilization_percent"}.issubset(df.columns):
-        df["ts"] = df["timestamp"].apply(_parse_ts)
-        return df.dropna(subset=["ts"])[["ts", "utilization_percent"]].sort_values("ts")
-
-    if "status" in df.columns:
-        if {"start_time", "end_time"}.issubset(df.columns):
-            df["start_dt"] = df["start_time"].apply(_parse_ts)
-            df["end_dt"] = df["end_time"].apply(_parse_ts)
-            df["ts"] = df.apply(
-                lambda r: r["start_dt"] + (r["end_dt"] - r["start_dt"]) / 2
-                if pd.notnull(r.get("start_dt")) and pd.notnull(r.get("end_dt"))
-                else r.get("start_dt"),
-                axis=1
-            )
+    if submit:
+        if not email or not password:
+            st.warning("Please fill both fields.")
         else:
-            ts_col = "timestamp" if "timestamp" in df.columns else ("ts" if "ts" in df.columns else None)
-            if ts_col:
-                df["ts"] = df[ts_col].apply(_parse_ts)
-            else:
-                return pd.DataFrame(columns=["ts", "utilization_percent"])
-
-        df = df.dropna(subset=["ts"]).sort_values("ts")
-        df["utilization_percent"] = df["status"].map(lambda s: 100.0 if str(s).lower() == "in_use" else 0.0)
-        return df[["ts", "utilization_percent"]]
-
-    if "timestamp" in df.columns:
-        df["ts"] = df["timestamp"].apply(_parse_ts)
-        if "utilization_percent" in df.columns:
-            return df.dropna(subset=["ts"])[["ts", "utilization_percent"]].sort_values("ts")
-
-    return pd.DataFrame(columns=["ts", "utilization_percent"])
-
-# =====================================================
-# ETA (Data-driven with fallback)
-# =====================================================
-def avg_session_time_for(zone: str) -> int:
-    return AVG_SESSION_TIME_BY_ZONE.get(zone, AVG_SESSION_TIME_DEFAULT)
-
-def eta_minutes(zone: str, current_util: float, ts_df: pd.DataFrame) -> int:
-    base = avg_session_time_for(zone)
-    if ts_df.empty:
-        raw = (current_util / 100.0) * base
-        return int(min(max(raw, 0), 30))
-    ts_df = ts_df.copy()
-    ts_df["hour"] = ts_df["ts"].dt.tz_convert("UTC").dt.hour if ts_df["ts"].dt.tz is not None else ts_df["ts"].dt.hour
-    hourly = ts_df.groupby("hour")["utilization_percent"].mean().reset_index()
-    this_hour = datetime.now(timezone.utc).hour
-    hist_util = hourly.loc[hourly["hour"] == this_hour, "utilization_percent"]
-    hist_util = float(hist_util.iloc[0]) if not hist_util.empty else ts_df["utilization_percent"].mean()
-    blended_util = 0.6 * current_util + 0.4 * hist_util
-    raw = (blended_util / 100.0) * base
-    if blended_util > 85:
-        raw *= 1.2
-    return int(min(max(raw, 0), 30))
-
-# =====================================================
-# ALERTS
-# =====================================================
-def render_alerts(zones: dict):
-    st.subheader("🚨 Live Zone Alerts")
-    flagged = 0
-    for zone, stats in zones.items():
-        util = stats.get("utilization_percent", 0)
-        if util > 85:
-            st.markdown(f"<div style='background:{ERROR};padding:12px;border-radius:8px;color:white;margin-bottom:6px;'>⚠️ <b>{zone}</b> crowded ({util:.0f}%) — expect a wait.</div>", unsafe_allow_html=True)
-            flagged += 1
-        elif util > 60:
-            st.markdown(f"<div style='background:{WARNING};padding:12px;border-radius:8px;color:black;margin-bottom:6px;'>🟡 <b>{zone}</b> moderately busy ({util:.0f}%).</div>", unsafe_allow_html=True)
-            flagged += 1
-        elif util > 0:
-            st.markdown(f"<div style='background:{SUCCESS};padding:12px;border-radius:8px;color:white;margin-bottom:6px;'>🟢 <b>{zone}</b> has availability.</div>", unsafe_allow_html=True)
-    if flagged == 0:
-        st.info("✅ All zones are quiet — perfect time to train!")
-
-# =====================================================
-# ZONE CARDS (with ETA + Check-In/Out + Popup)
-# =====================================================
-def render_zone_cards(data: dict, selected_group: str):
-    if not data or "zones" not in data:
-        st.warning("No zone data available.")
-        return None
-
-    zones = data["zones"]
-    allowed = MUSCLE_ZONE_MAP.get(selected_group, [])
-    filtered = zones if selected_group == "All" else {z: v for z, v in zones.items() if z in allowed}
-
-    st.subheader(f"📍 {selected_group} Zone Overview")
-    st.caption(f"Last updated: {data.get('fetched_at','unknown')}")
-
-    clicked = None
-    items = list(filtered.items())
-    per_row = 3
-
-    for i in range(0, len(items), per_row):
-        cols = st.columns(per_row)
-        for col, (zone, stats) in zip(cols, items[i:i + per_row]):
-            util = float(stats.get("utilization_percent", 0))
-            avail = int(stats.get("available", 0))
-            in_use = int(stats.get("in_use", 0))
-            logs = fetch_usage_logs(zone)
-            ts_df = logs_to_timeseries(logs)
-            eta = eta_minutes(zone, util, ts_df)
-            color = SUCCESS if util == 0 else (WARNING if util < 70 else ERROR)
-            emoji = "🟢" if util == 0 else ("🟡" if util < 70 else "🔴")
-
-            if col.button(f"{zone}", key=f"open_{zone}", use_container_width=True):
-                clicked = zone
-
-            col.markdown(f"""
-            <div style="background:{color};border-radius:20px;padding:20px;box-shadow:0 6px 18px rgba(0,0,0,0.25);
-            color:white; text-align:center; font-family:'Segoe UI';margin-top:8px;">
-                <h3 style="margin:2px 0 8px 0;">{zone} {emoji}</h3>
-                <h1 style="margin:0 0 6px 0;">{util:.0f}%</h1>
-                <p style="margin:0;">In Use: <b>{in_use}</b> | Available: <b>{avail}</b></p>
-                <p style="margin:6px 0 0 0;">⏱ ETA: <b>{eta} min</b></p>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # --- ACTION BUTTONS ---
-            c1, c2 = col.columns(2)
-
-            # ✅ CHECK-IN
-            if c1.button("✅ Check In", key=f"checkin_{zone}", use_container_width=True):
-                r = post_usage_update(zone, "in_use")
-                if not r:
-                    st.error("Network issue — please try again.")
-                elif r.status_code in (200, 201):
-                    st.success(f"Checked into {zone}.")
-                    st.rerun()
-                elif r.status_code == 400 and "already checked into" in r.text:
-                    error_msg = r.json().get("detail", "")
-                    try:
-                        prev_zone = error_msg.split("into ")[1].split(" (")[0]
-                    except Exception:
-                        prev_zone = "unknown"
-                    with st.modal("⚠️ Already Checked In"):
-                        st.markdown(f"Looks like you're already checked into **{prev_zone}**.")
-                        st.markdown(f"Would you like to **check out of {prev_zone}** and check into **{zone}** instead?")
-                        colA, colB = st.columns(2)
-                        if colA.button("✅ Yes, switch"):
-                            requests.post(f"http://127.0.0.1:8000/checkout/{prev_zone}")
-                            r2 = post_usage_update(zone, "in_use")
-                            if r2 and r2.status_code in (200, 201):
-                                st.success(f"Switched to {zone}.")
-                                st.rerun()
-                            else:
-                                st.error("Something went wrong during the switch.")
-                        if colB.button("❌ No, stay"):
-                            st.info("Stayed checked into previous zone.")
+            try:
+                if mode == "Sign Up":
+                    signup_user(email, password)
+                    st.success("✅ Account created! You can now log in.")
                 else:
-                    st.error(f"Update failed ({r.status_code}): {r.text}")
-
-            # 🚪 CHECK-OUT
-            if c2.button("🚪 Check Out", key=f"checkout_{zone}", use_container_width=True):
-                r = post_usage_update(zone, "available")
-                if r and r.status_code in (200, 201):
-                    st.success(f"Checked out of {zone}.")
+                    res = signin_user(email, password)
+                    st.session_state.user_name = email.split("@")[0]
+                    st.session_state.user_id = res["localId"]
+                    st.session_state.auth_complete = True
+                    st.session_state.stage = "welcome"
                     st.rerun()
-
-    return clicked
+            except Exception as e:
+                st.error(str(e))
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
 
 # =====================================================
-# DETAIL CHART
+# CURRENT CHECK-IN STATUS + SWITCH LOGIC
 # =====================================================
-def render_detail(zone: str):
-    st.divider()
-    st.subheader(f"📈 Detailed Utilization — {zone}")
-    logs = fetch_usage_logs(zone)
-    if not logs:
-        st.info("No usage data yet.")
+def get_current_checkin():
+    user = st.session_state.user_name or "demo_user"
+    data = fetch_json(EQUIPMENTS_URL)
+    if not data:
+        return None
+    active = [e for e in data if e.get("current_user") == user and e.get("status") == "in_use"]
+    return active[0] if active else None
+
+def render_current_status(current):
+    st.markdown("### 🧍 Current Check-In Status")
+    if not current:
+        st.info("✅ You are not checked into any equipment.")
         return
-    ts_df = logs_to_timeseries(logs)
-    if ts_df.empty:
-        st.info("No plottable timestamps found in logs.")
-        return
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=ts_df["ts"], y=ts_df["utilization_percent"], mode="lines+markers", line=dict(width=2), marker=dict(size=6)))
-    fig.update_layout(xaxis_title="Time", yaxis_title="Utilization (%)", yaxis=dict(range=[0, 100]), margin=dict(l=10, r=10, t=10, b=10), height=340)
-    st.plotly_chart(fig, use_container_width=True)
+
+    zone = current.get("zone")
+    eq_id = current.get("equipment_id")
+    start_time = current.get("start_time")
+
+    st.markdown(f"""
+    <div class="glass">
+      <b>Equipment:</b> {eq_id}<br>
+      <b>Zone:</b> {zone}<br>
+      <b>Start Time:</b> {start_time}
+    </div>
+    """, unsafe_allow_html=True)
+
+    heatmap = fetch_json(API_URL)
+    available_zones = []
+    if heatmap and "zones" in heatmap:
+        available_zones = [
+            z for z, v in heatmap["zones"].items()
+            if v.get("available", 0) > 0 and z != zone
+        ]
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button(f"🏁 Check Out from {zone}", key=f"checkout_{eq_id}"):
+            r = post_usage_update(zone, "available")
+            if r and r.status_code in (200, 201):
+                st.success(f"✅ Checked out from {zone}.")
+                st.rerun()
+            else:
+                st.error("Something went wrong while checking out.")
+
+    with c2:
+        st.session_state["switch_target"] = st.selectbox(
+            "Switch to another available zone:",
+            [None] + available_zones,
+            key="switch_select",
+        )
+        if st.session_state["switch_target"]:
+            if st.button("🔁 Confirm Switch"):
+                st.session_state.show_modal = True
+                st.session_state.modal_from = zone
+                st.session_state.modal_to = st.session_state["switch_target"]
+                st.session_state.heatmap_snapshot = heatmap
+                st.rerun()
 
 # =====================================================
-# MAIN
+# SWITCH CONFIRMATION MODAL WITH ADAPTIVE ETA
 # =====================================================
-data = fetch_heatmap()
-if not data:
-    st.warning("No data available.")
-else:
+# =====================================================
+# SWITCH CONFIRMATION "MODAL" (custom overlay version)
+# =====================================================
+# =====================================================
+# SWITCH CONFIRMATION "MODAL" (animated overlay)
+# =====================================================
+# =====================================================
+# SWITCH CONFIRMATION MODAL (with ✖ Close + fade animation)
+# =====================================================
+def render_modal():
+    if st.session_state.show_modal:
+        st.markdown("""
+        <style>
+        /* ===== Overlay background ===== */
+        .overlay-bg {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.65);
+            z-index: 999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            animation: fadeIn 0.3s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.96); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        /* ===== Modal box ===== */
+        .overlay-box {
+            position: relative;
+            background: #1f2937;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 18px;
+            padding: 32px 34px;
+            width: 430px;
+            color: #e5e7eb;
+            text-align: center;
+            box-shadow: 0 12px 45px rgba(0,0,0,0.5);
+            animation: fadeInUp 0.35s ease-out;
+            z-index: 1000;
+        }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ===== Close icon ===== */
+        .close-btn {
+            position: absolute;
+            top: 12px;
+            right: 14px;
+            font-size: 20px;
+            color: #9ca3af;
+            cursor: pointer;
+            transition: color 0.2s ease, transform 0.2s ease;
+        }
+        .close-btn:hover {
+            color: #f87171;
+            transform: scale(1.15);
+        }
+
+        /* ===== Ensure Streamlit components are clickable ===== */
+        [data-testid="stAppViewContainer"] {
+            pointer-events: auto !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        from_zone = st.session_state.modal_from
+        to_zone = st.session_state.modal_to
+        heatmap = st.session_state.heatmap_snapshot
+
+        zone_stats = heatmap["zones"].get(to_zone, {})
+        util = zone_stats.get("utilization_percent", 0)
+        eta = get_eta_for_zone(to_zone, util)
+        color = "🟢" if util < 30 else ("🟡" if util < 70 else "🔴")
+        avg_time = AVG_SESSION_TIME_BY_ZONE.get(to_zone, DEFAULT_SESSION)
+
+        # ===== Render modal HTML =====
+        st.markdown(f"""
+        <div class="overlay-bg">
+          <div class="overlay-box">
+            <div class="close-btn" onclick="window.parent.postMessage({{type: 'close_modal'}}, '*')">✖</div>
+            <h3 style='margin-bottom:12px;'>⚠️ Confirm Zone Switch</h3>
+            <p>You're about to switch from <b>{from_zone}</b> → <b>{to_zone}</b></p>
+            <p>{color} <b>{to_zone.capitalize()} Zone:</b> {util}% utilized</p>
+            <p>⏱ Typical session: {avg_time} min<br>⏳ Estimated wait ≈ <b>{eta} min</b></p>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ===== Buttons below modal =====
+        st.markdown("<br>", unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Yes, Switch", key="modal_yes"):
+                r1 = post_usage_update(from_zone, "available")
+                r2 = post_usage_update(to_zone, "in_use")
+                if r1 and r1.status_code in (200, 201) and r2 and r2.status_code in (200, 201):
+                    st.success(f"✅ Switched from {from_zone} → {to_zone}.")
+                    st.session_state.show_modal = False
+                    st.session_state.switch_target = None
+                    st.rerun()
+                else:
+                    st.error("Something went wrong while switching zones.")
+        with c2:
+            if st.button("❌ Cancel", key="modal_cancel"):
+                st.session_state.show_modal = False
+                st.session_state.switch_target = None
+                st.rerun()
+
+        # ===== Handle close button clicks =====
+        st.markdown("""
+        <script>
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'close_modal') {
+                window.parent.postMessage({type: 'streamlit_close_modal'}, '*');
+            }
+        });
+        </script>
+        """, unsafe_allow_html=True)
+
+
+# =====================================================
+# SMART SUGGESTIONS
+# =====================================================
+def render_suggestions(data, group, current):
     zones = data.get("zones", {})
-    render_alerts(zones)
-    st.divider()
-    selected_group = st.selectbox("🎯 Select Muscle Group", list(MUSCLE_ZONE_MAP.keys()), index=0)
-    opened = render_zone_cards(data, selected_group)
-    if opened:
-        render_detail(opened)
+    suggestions = []
+    for item in WORKOUT_LIBRARY.get(group, []):
+        z = item["zone"]
+        stats = zones.get(z, {"utilization_percent": 0})
+        util = float(stats.get("utilization_percent", 0))
+        eta = get_eta_for_zone(z, util)
+        suggestions.append({"name": item["name"], "zone": z, "eta": eta, "util": util})
+
+    suggestions.sort(key=lambda x: x["eta"])
+    st.markdown("### 🧠 <span class='urec-gradient'>Smart Workout Suggestions</span>", unsafe_allow_html=True)
+
+    for s in suggestions:
+        dot = "🟢" if s["util"] < 30 else ("🟡" if s["util"] < 70 else "🔴")
+        st.markdown(f"""
+        <div class='sugg-card'>
+          <b>{s['name']}</b> ({s['zone']})<br>
+          ETA: {s['eta']} min | {dot}
+        </div>
+        """, unsafe_allow_html=True)
+
+        disabled = current and current.get("zone") != s["zone"]
+
+        if disabled:
+            st.markdown(f"<div class='disabled-btn'><button disabled>✅ Check In to {s['zone']}</button></div>", unsafe_allow_html=True)
+        else:
+            if st.button(f"✅ Check In to {s['zone']}", key=f"sugg_{s['zone']}_{s['name']}"):
+                r = post_usage_update(s["zone"], "in_use")
+                if r and r.status_code in (200, 201):
+                    st.success(f"✅ Checked into {s['zone']}.")
+                    st.rerun()
+                else:
+                    st.error("Could not check in. Please retry.")
+
+# =====================================================
+# MAIN FLOW
+# =====================================================
+st.markdown("<h1 class='urec-gradient'>🏋️ UREC Live Equipment Dashboard</h1>", unsafe_allow_html=True)
+st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="autorefresh")
+
+if not st.session_state.auth_complete:
+    login_screen()
+
+if st.session_state.stage == "welcome":
+    st.markdown(f"### 👋 Welcome, **{st.session_state.user_name}**!")
+    group = st.selectbox("Choose muscle group:", list(WORKOUT_LIBRARY.keys()), index=None, placeholder="Select...")
+    if group and st.button("Show My Plan 🚀"):
+        st.session_state.stage = "recommend"
+        st.session_state.selected_group = group
+        st.rerun()
+
+elif st.session_state.stage == "recommend":
+    data = fetch_json(API_URL)
+    if not data:
+        st.warning("No data available.")
+    else:
+        current = get_current_checkin()
+        render_current_status(current)
+        render_modal()  # ✅ includes adaptive ETA
+        st.markdown("<hr style='opacity:0.2;'>", unsafe_allow_html=True)
+        render_suggestions(data, st.session_state.selected_group, current)
+else:
+    login_screen()
