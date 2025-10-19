@@ -1,8 +1,9 @@
 import streamlit as st
 import requests
 from datetime import datetime, timezone
+import pandas as pd
 from streamlit_autorefresh import st_autorefresh
-from firebase_auth import signup_user, signin_user  # Firebase helpers
+from firebase_auth import signup_user, signin_user
 
 # =====================================================
 # PAGE CONFIG
@@ -51,57 +52,27 @@ h1, h2, h3 { letter-spacing:.2px; }
 # CONSTANTS
 # =====================================================
 API_URL = "http://127.0.0.1:8000/analytics/heatmap"
-USAGE_UPDATE_URL = "http://127.0.0.1:8000/usage_logs/update"
 EQUIPMENTS_URL = "http://127.0.0.1:8000/equipments"
-REFRESH_INTERVAL = 5  # seconds
+USAGE_UPDATE_URL = "http://127.0.0.1:8000/usage_logs/update"
+EXERCISES_URL = "http://127.0.0.1:8000/exercises"
+REFRESH_INTERVAL = 10  # seconds
 
-# Adaptive session averages (mins)
 AVG_SESSION_TIME_BY_ZONE = {
-    "cardio": 20,
-    "dumbbells": 12,
-    "benches": 15,
-    "squat racks": 25,
-    "Back Machines": 18,
+    "cardio": 20, "dumbbells": 12, "benches": 15,
+    "squat racks": 25, "back machines": 18,
+    "bicep machines": 10, "tricep machines": 12,
+    "shoulder machines": 14, "quad machines": 16,
+    "glute machines": 18, "leg machines": 20
 }
 DEFAULT_SESSION = 20
-
-WORKOUT_LIBRARY = {
-    "Chest": [
-        {"name": "Bench Press", "zone": "benches"},
-        {"name": "Incline Dumbbell Press", "zone": "dumbbells"},
-    ],
-    "Back": [
-        {"name": "Lat Pulldown", "zone": "Back Machines"},
-        {"name": "Seated Row", "zone": "Back Machines"},
-    ],
-    "Legs": [
-        {"name": "Back Squat", "zone": "squat racks"},
-        {"name": "Leg Extension", "zone": "Back Machines"},
-    ],
-    "Arms": [
-        {"name": "Bicep Curls", "zone": "dumbbells"},
-        {"name": "Tricep Pushdown", "zone": "Back Machines"},
-    ],
-    "Core": [
-        {"name": "Weighted Crunch", "zone": "dumbbells"},
-        {"name": "Cable Woodchop", "zone": "Back Machines"},
-    ],
-    "Cardio": [
-        {"name": "Treadmill Run", "zone": "cardio"},
-        {"name": "Bike Intervals", "zone": "cardio"},
-    ],
-}
 
 # =====================================================
 # SESSION STATE
 # =====================================================
 defaults = {
-    "user_id": None,
-    "user_name": None,
-    "auth_complete": False,
-    "stage": "login",
-    "selected_group": None,
-    "switch_target": None,
+    "user_id": None, "user_name": None,
+    "auth_complete": False, "stage": "login",
+    "selected_group": None, "switch_target": None,
     "show_modal": False,
 }
 for k, v in defaults.items():
@@ -109,8 +80,15 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # =====================================================
-# API HELPERS
+# HELPERS
 # =====================================================
+def rerun_safe():
+    """Handle Streamlit rerun compatibly."""
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
 def fetch_json(url):
     try:
         r = requests.get(url, timeout=5)
@@ -118,7 +96,9 @@ def fetch_json(url):
     except:
         return None
 
+
 def post_usage_update(zone, status):
+    """Update usage status in backend"""
     payload = {
         "zone": zone,
         "status": status,
@@ -130,9 +110,33 @@ def post_usage_update(zone, status):
     except:
         return None
 
+
 def get_eta_for_zone(zone, utilization):
-    avg_time = AVG_SESSION_TIME_BY_ZONE.get(zone, DEFAULT_SESSION)
+    avg_time = AVG_SESSION_TIME_BY_ZONE.get(zone.lower(), DEFAULT_SESSION)
     return int((utilization / 100.0) * avg_time)
+
+
+@st.cache_data(ttl=120)
+def fetch_workout_library():
+    """Fetch all exercises once from backend"""
+    try:
+        data = fetch_json(EXERCISES_URL)
+        if not data or "exercises" not in data:
+            return {}
+        workout_library = {}
+        for ex in data["exercises"]:
+            muscle = ex.get("primary_muscle", "Other")
+            workout_library.setdefault(muscle, []).append({
+                "name": ex.get("exercise_name"),
+                "zone": ex.get("equipment_type"),
+            })
+        return workout_library
+    except Exception as e:
+        print("Error fetching workout library:", e)
+        return {}
+
+
+WORKOUT_LIBRARY = fetch_workout_library()
 
 # =====================================================
 # LOGIN
@@ -140,7 +144,6 @@ def get_eta_for_zone(zone, utilization):
 def login_screen():
     st.markdown('<div class="overlay">', unsafe_allow_html=True)
     st.markdown("<h2 class='urec-gradient'>🔐 Welcome to UREC Live</h2>", unsafe_allow_html=True)
-
     mode = st.radio("Mode:", ["Login", "Sign Up"], horizontal=True)
     with st.form("auth_form"):
         email = st.text_input("📧 Email")
@@ -161,201 +164,72 @@ def login_screen():
                     st.session_state.user_id = res["localId"]
                     st.session_state.auth_complete = True
                     st.session_state.stage = "welcome"
-                    st.rerun()
+                    rerun_safe()
             except Exception as e:
                 st.error(str(e))
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 # =====================================================
-# CURRENT CHECK-IN STATUS + SWITCH LOGIC
+# HEATMAP PANEL
+# =====================================================
+def render_heatmap_panel():
+    st.markdown("### 🌡️ Live Gym Occupancy Overview")
+    data = fetch_json(API_URL)
+    if not data or "zones" not in data:
+        st.warning("No live data available.")
+        return
+
+    zones = data["zones"]
+    df = pd.DataFrame([{"Zone": k, "Utilization": v.get("utilization_percent", 0)} for k, v in zones.items()])
+    st.bar_chart(df.set_index("Zone"))
+
+    # Historical mock trend
+    st.markdown("#### ⏱ Historical Utilization Trend (Simulated)")
+    times = pd.date_range(end=datetime.now(), periods=12, freq="H")
+    mock_data = pd.DataFrame({
+        "Time": times,
+        "Occupancy %": [min(100, abs(60 + 30 * (i % 4 - 2))) for i in range(len(times))],
+    }).set_index("Time")
+    st.area_chart(mock_data)
+    st.caption("💡 Scroll through hours to find less active times (simulated trend).")
+
+# =====================================================
+# CHECK-IN STATUS
 # =====================================================
 def get_current_checkin():
     user = st.session_state.user_name or "demo_user"
     data = fetch_json(EQUIPMENTS_URL)
     if not data:
         return None
-    active = [e for e in data if e.get("current_user") == user and e.get("status") == "in_use"]
-    return active[0] if active else None
+
+    user = user.strip().lower()
+    for e in data:
+        if e.get("current_user", "").strip().lower() == user and e.get("status", "").lower() in ["in_use", "occupied"]:
+            return e
+    return None
+
 
 def render_current_status(current):
-    st.markdown("### 🧍 Current Check-In Status")
     if not current:
         st.info("✅ You are not checked into any equipment.")
         return
 
-    zone = current.get("zone")
+    zone = current.get("zone") or current.get("equipment_type")
     eq_id = current.get("equipment_id")
-    start_time = current.get("start_time")
+    st.markdown(f"### 🧍 Checked into: **{zone} ({eq_id})**")
 
-    st.markdown(f"""
-    <div class="glass">
-      <b>Equipment:</b> {eq_id}<br>
-      <b>Zone:</b> {zone}<br>
-      <b>Start Time:</b> {start_time}
-    </div>
-    """, unsafe_allow_html=True)
-
-    heatmap = fetch_json(API_URL)
-    available_zones = []
-    if heatmap and "zones" in heatmap:
-        available_zones = [
-            z for z, v in heatmap["zones"].items()
-            if v.get("available", 0) > 0 and z != zone
-        ]
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button(f"🏁 Check Out from {zone}", key=f"checkout_{eq_id}"):
+    if st.button(f"🏁 Check Out from {zone}", key=f"checkout_{eq_id}"):
+        with st.spinner("Processing checkout..."):
             r = post_usage_update(zone, "available")
-            if r and r.status_code in (200, 201):
-                st.success(f"✅ Checked out from {zone}.")
-                st.rerun()
-            else:
-                st.error("Something went wrong while checking out.")
-
-    with c2:
-        st.session_state["switch_target"] = st.selectbox(
-            "Switch to another available zone:",
-            [None] + available_zones,
-            key="switch_select",
-        )
-        if st.session_state["switch_target"]:
-            if st.button("🔁 Confirm Switch"):
-                st.session_state.show_modal = True
-                st.session_state.modal_from = zone
-                st.session_state.modal_to = st.session_state["switch_target"]
-                st.session_state.heatmap_snapshot = heatmap
-                st.rerun()
-
-# =====================================================
-# SWITCH CONFIRMATION MODAL WITH ADAPTIVE ETA
-# =====================================================
-# =====================================================
-# SWITCH CONFIRMATION "MODAL" (custom overlay version)
-# =====================================================
-# =====================================================
-# SWITCH CONFIRMATION "MODAL" (animated overlay)
-# =====================================================
-# =====================================================
-# SWITCH CONFIRMATION MODAL (with ✖ Close + fade animation)
-# =====================================================
-def render_modal():
-    if st.session_state.show_modal:
-        st.markdown("""
-        <style>
-        /* ===== Overlay background ===== */
-        .overlay-bg {
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.65);
-            z-index: 999;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            animation: fadeIn 0.3s ease-out;
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.96); }
-            to { opacity: 1; transform: scale(1); }
-        }
-
-        /* ===== Modal box ===== */
-        .overlay-box {
-            position: relative;
-            background: #1f2937;
-            border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 18px;
-            padding: 32px 34px;
-            width: 430px;
-            color: #e5e7eb;
-            text-align: center;
-            box-shadow: 0 12px 45px rgba(0,0,0,0.5);
-            animation: fadeInUp 0.35s ease-out;
-            z-index: 1000;
-        }
-        @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* ===== Close icon ===== */
-        .close-btn {
-            position: absolute;
-            top: 12px;
-            right: 14px;
-            font-size: 20px;
-            color: #9ca3af;
-            cursor: pointer;
-            transition: color 0.2s ease, transform 0.2s ease;
-        }
-        .close-btn:hover {
-            color: #f87171;
-            transform: scale(1.15);
-        }
-
-        /* ===== Ensure Streamlit components are clickable ===== */
-        [data-testid="stAppViewContainer"] {
-            pointer-events: auto !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        from_zone = st.session_state.modal_from
-        to_zone = st.session_state.modal_to
-        heatmap = st.session_state.heatmap_snapshot
-
-        zone_stats = heatmap["zones"].get(to_zone, {})
-        util = zone_stats.get("utilization_percent", 0)
-        eta = get_eta_for_zone(to_zone, util)
-        color = "🟢" if util < 30 else ("🟡" if util < 70 else "🔴")
-        avg_time = AVG_SESSION_TIME_BY_ZONE.get(to_zone, DEFAULT_SESSION)
-
-        # ===== Render modal HTML =====
-        st.markdown(f"""
-        <div class="overlay-bg">
-          <div class="overlay-box">
-            <div class="close-btn" onclick="window.parent.postMessage({{type: 'close_modal'}}, '*')">✖</div>
-            <h3 style='margin-bottom:12px;'>⚠️ Confirm Zone Switch</h3>
-            <p>You're about to switch from <b>{from_zone}</b> → <b>{to_zone}</b></p>
-            <p>{color} <b>{to_zone.capitalize()} Zone:</b> {util}% utilized</p>
-            <p>⏱ Typical session: {avg_time} min<br>⏳ Estimated wait ≈ <b>{eta} min</b></p>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ===== Buttons below modal =====
-        st.markdown("<br>", unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ Yes, Switch", key="modal_yes"):
-                r1 = post_usage_update(from_zone, "available")
-                r2 = post_usage_update(to_zone, "in_use")
-                if r1 and r1.status_code in (200, 201) and r2 and r2.status_code in (200, 201):
-                    st.success(f"✅ Switched from {from_zone} → {to_zone}.")
-                    st.session_state.show_modal = False
-                    st.session_state.switch_target = None
-                    st.rerun()
-                else:
-                    st.error("Something went wrong while switching zones.")
-        with c2:
-            if st.button("❌ Cancel", key="modal_cancel"):
-                st.session_state.show_modal = False
-                st.session_state.switch_target = None
-                st.rerun()
-
-        # ===== Handle close button clicks =====
-        st.markdown("""
-        <script>
-        window.addEventListener('message', (event) => {
-            if (event.data && event.data.type === 'close_modal') {
-                window.parent.postMessage({type: 'streamlit_close_modal'}, '*');
-            }
-        });
-        </script>
-        """, unsafe_allow_html=True)
-
+        if r and r.status_code in (200, 201):
+            st.success(f"✅ Checked out from {zone}. Returning to dashboard...")
+            st.session_state["selected_group"] = None
+            st.session_state["stage"] = "welcome"
+            st.cache_data.clear()
+            rerun_safe()
+        else:
+            st.error("❌ Something went wrong while checking out.")
 
 # =====================================================
 # SMART SUGGESTIONS
@@ -364,7 +238,7 @@ def render_suggestions(data, group, current):
     zones = data.get("zones", {})
     suggestions = []
     for item in WORKOUT_LIBRARY.get(group, []):
-        z = item["zone"]
+        z = item["zone"].lower()
         stats = zones.get(z, {"utilization_percent": 0})
         util = float(stats.get("utilization_percent", 0))
         eta = get_eta_for_zone(z, util)
@@ -382,18 +256,18 @@ def render_suggestions(data, group, current):
         </div>
         """, unsafe_allow_html=True)
 
-        disabled = current and current.get("zone") != s["zone"]
+        if current and current.get("zone", "").lower() == s["zone"]:
+            st.markdown("<div class='disabled-btn'>Already checked in</div>", unsafe_allow_html=True)
+            continue
 
-        if disabled:
-            st.markdown(f"<div class='disabled-btn'><button disabled>✅ Check In to {s['zone']}</button></div>", unsafe_allow_html=True)
-        else:
-            if st.button(f"✅ Check In to {s['zone']}", key=f"sugg_{s['zone']}_{s['name']}"):
+        if st.button(f"✅ Check In to {s['zone']}", key=f"sugg_{s['zone']}_{s['name']}"):
+            with st.spinner(f"Checking into {s['zone']}..."):
                 r = post_usage_update(s["zone"], "in_use")
-                if r and r.status_code in (200, 201):
-                    st.success(f"✅ Checked into {s['zone']}.")
-                    st.rerun()
-                else:
-                    st.error("Could not check in. Please retry.")
+            if r and r.status_code in (200, 201):
+                st.success(f"✅ Checked into {s['zone']} successfully!")
+                rerun_safe()
+            else:
+                st.error("❌ Could not check in. Please retry.")
 
 # =====================================================
 # MAIN FLOW
@@ -404,23 +278,26 @@ st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="autorefresh")
 if not st.session_state.auth_complete:
     login_screen()
 
-if st.session_state.stage == "welcome":
-    st.markdown(f"### 👋 Welcome, **{st.session_state.user_name}**!")
-    group = st.selectbox("Choose muscle group:", list(WORKOUT_LIBRARY.keys()), index=None, placeholder="Select...")
-    if group and st.button("Show My Plan 🚀"):
-        st.session_state.stage = "recommend"
-        st.session_state.selected_group = group
-        st.rerun()
+col1, col2 = st.columns([2, 1])
 
-elif st.session_state.stage == "recommend":
-    data = fetch_json(API_URL)
-    if not data:
-        st.warning("No data available.")
-    else:
-        current = get_current_checkin()
-        render_current_status(current)
-        render_modal()  # ✅ includes adaptive ETA
-        st.markdown("<hr style='opacity:0.2;'>", unsafe_allow_html=True)
-        render_suggestions(data, st.session_state.selected_group, current)
-else:
-    login_screen()
+with col1:
+    if st.session_state.stage == "welcome":
+        st.markdown(f"### 👋 Welcome, **{st.session_state.user_name}**!")
+        group = st.selectbox("Choose muscle group:", list(WORKOUT_LIBRARY.keys()), index=None, placeholder="Select...")
+        if group and st.button("Show My Plan 🚀"):
+            st.session_state.stage = "recommend"
+            st.session_state.selected_group = group
+            rerun_safe()
+
+    elif st.session_state.stage == "recommend":
+        data = fetch_json(API_URL)
+        if not data:
+            st.warning("⚠️ No data available.")
+        else:
+            current = get_current_checkin()
+            render_current_status(current)
+            st.markdown("<hr style='opacity:0.2;'>", unsafe_allow_html=True)
+            render_suggestions(data, st.session_state.selected_group, current)
+
+with col2:
+    render_heatmap_panel()

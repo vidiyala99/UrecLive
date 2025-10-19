@@ -60,11 +60,13 @@ def check_in(zone_name: str, user: str = "demo_user"):
 # 5. Check Out
 # =====================================================
 @router.post("/checkout/{zone_name}")
-def check_out(zone_name: str):
-    docs = db.collection("equipments").where("zone", "==", zone_name).where("status", "==", "in_use").stream()
+def check_out(zone_name: str, user: str):
+    # The query now also checks for the correct user
+    docs = db.collection("equipments").where("zone", "==", zone_name).where("status", "==", "in_use").where("current_user", "==", user).stream()
     target = next(docs, None)
     if not target:
-        raise HTTPException(status_code=404, detail=f"No in-use equipment found in '{zone_name}'")
+        # More specific error message
+        raise HTTPException(status_code=404, detail=f"User '{user}' not found in any in-use equipment in '{zone_name}'")
 
     data = target.to_dict()
     doc_ref = db.collection("equipments").document(target.id)
@@ -98,7 +100,7 @@ def get_usage_logs(equipment_id: str):
 # =====================================================
 @router.post("/usage_logs/update")
 def update_usage_log(payload: dict):
-    print("🔥 Incoming payload:", payload)  # <--- Add this
+    print("🔥 Incoming payload:", payload)
     zone = payload.get("zone")
     status = payload.get("status")
     user = payload.get("user", "demo_user")
@@ -110,7 +112,8 @@ def update_usage_log(payload: dict):
         if status == "in_use":
             return check_in(zone, user)
         else:
-            return check_out(zone)
+            # Pass the 'user' variable to the check_out function
+            return check_out(zone, user)
     except HTTPException as e:
         print("⚠️ HTTP Exception:", e.detail)
         raise
@@ -136,7 +139,11 @@ def get_heatmap():
             zones[zone]["in_use"] += 1
         else:
             zones[zone]["available"] += 1
+            
     for zone, v in zones.items():
         total = v["available"] + v["in_use"]
+        v["total"] = total # <-- THIS IS THE FIX
         v["utilization_percent"] = round((v["in_use"] / total) * 100 if total else 0, 1)
+        
     return {"zones": zones}
+
